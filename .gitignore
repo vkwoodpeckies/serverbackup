@@ -1,0 +1,19 @@
+# .NET build output
+[Bb]in/
+[Oo]bj/
+publish/
+
+# Installer artifacts and local diagnostics
+installer/Output/
+installer-*.log
+*.log
+nssm.exe
+
+# Local runtime data
+data/
+__pycache__/
+*.py[cod]
+
+# IDE settings
+.vs/
+*.user

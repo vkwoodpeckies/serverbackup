@@ -1,0 +1,1 @@
+<Project Sdk="Microsoft.NET.Sdk.Worker"><ItemGroup><ProjectReference Include="..\BackupManager.Core\BackupManager.Core.csproj" /><PackageReference Include="Microsoft.Extensions.Hosting.WindowsServices" Version="8.0.0" /></ItemGroup></Project>

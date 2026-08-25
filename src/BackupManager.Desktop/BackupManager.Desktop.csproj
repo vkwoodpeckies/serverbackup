@@ -1,0 +1,1 @@
+<Project Sdk="Microsoft.NET.Sdk"><PropertyGroup><UseWPF>true</UseWPF><UseWindowsForms>true</UseWindowsForms><OutputType>WinExe</OutputType></PropertyGroup><ItemGroup><ProjectReference Include="..\BackupManager.Core\BackupManager.Core.csproj" /></ItemGroup></Project>
