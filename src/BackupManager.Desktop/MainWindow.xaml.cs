@@ -240,7 +240,7 @@ public partial class MainWindow : Window
     private static async Task TestFtpAsync(string host, int port, string user, string password, string folder, bool useFtps, bool trustInvalidCertificate)
     {
         var config = new RemoteFtpConfig { Host = host, Port = port, UserName = user, RemoteFolder = folder, UseFtps = useFtps, TrustInvalidCertificate = trustInvalidCertificate };
-        var result = await RunCurlAsync(config, password, ["--list-only", FtpUri(config, folder.Trim('/')).ToString()]); if (result.ExitCode != 0) throw new InvalidOperationException(result.Error.Trim());
+        var result = await RunCurlAsync(config, password, ["--list-only", FtpUri(config, folder.Trim('/') + "/").ToString()]); if (result.ExitCode != 0) throw new InvalidOperationException(result.Error.Trim());
     }
     private static System.Net.Security.RemoteCertificateValidationCallback? SetCertificatePolicy(bool trustInvalidCertificate)
     {
@@ -252,7 +252,7 @@ public partial class MainWindow : Window
     private static Uri FtpUri(RemoteFtpConfig config, string remotePath)
     {
         var endpoint = config.Host.StartsWith("ftp://", StringComparison.OrdinalIgnoreCase) ? config.Host : "ftp://" + config.Host;
-        var builder = new UriBuilder(new Uri(endpoint)) { Port = config.Port, Path = remotePath.Trim('/') };
+        var builder = new UriBuilder(new Uri(endpoint)) { Port = config.Port, Path = remotePath.TrimStart('/') };
         return builder.Uri;
     }
     private static async Task EnsureRemoteDirectoryAsync(RemoteFtpConfig config, string password, string remotePath)
@@ -345,7 +345,8 @@ public partial class MainWindow : Window
     {
         var config = _config.RemoteFtp; if (config is null) return [];
         var password = Unprotect(config.EncryptedPassword); if (string.IsNullOrEmpty(password)) return [];
-        var records = new List<RemoteBackupRecord>();
+        var records = new List<RemoteBackupRecord>(); var indexedRecords = new List<RemoteBackupRecord>();
+        try { var indexBytes = await DownloadRemoteBytesAsync(config, password, config.RemoteFolder.Trim('/') + "/backup-index.json"); indexedRecords = JsonSerializer.Deserialize<List<RemoteBackupRecord>>(indexBytes) ?? []; } catch { }
         var listed = 0;
         try
         {
@@ -354,7 +355,7 @@ public partial class MainWindow : Window
                 var root = config.RemoteFolder.Trim('/'); var paths = new[] { root + "/" + category, root + "/" + root + "/" + category, category }.Distinct(StringComparer.OrdinalIgnoreCase);
                 foreach (var remoteFolder in paths)
                 {
-                    var result = await RunCurlAsync(config, password, ["--list-only", FtpUri(config, remoteFolder).ToString()]); if (result.ExitCode != 0) continue;
+                    var result = await RunCurlAsync(config, password, ["--list-only", FtpUri(config, remoteFolder + "/").ToString()]); if (result.ExitCode != 0) continue;
                     listed++;
                     foreach (var name in result.Output.Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)) { if (!name.StartsWith("backup_", StringComparison.OrdinalIgnoreCase) || !name.EndsWith(".zip", StringComparison.OrdinalIgnoreCase)) continue; var stem = name[7..^4]; var split = stem.IndexOf('_'); if (split < 0) continue; var stamp = stem[(split + 1)..]; var completed = DateTimeOffset.Now; DateTimeOffset.TryParseExact(stamp, "dd_MMM_yyyy_hh_mm_tt", System.Globalization.CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.AssumeLocal, out completed); if (!records.Any(x => x.FileName.Equals(name, StringComparison.OrdinalIgnoreCase) && x.Category.Equals(category, StringComparison.OrdinalIgnoreCase))) records.Add(new RemoteBackupRecord(name, category, completed, "", "")); }
                     if (records.Any(x => x.Category.Equals(category, StringComparison.OrdinalIgnoreCase))) break;
@@ -362,7 +363,8 @@ public partial class MainWindow : Window
             }
         }
         catch { }
-        if (listed == 0) throw new InvalidOperationException("Unable to list the remote files/mysql backup folders. The remote index was not changed.");
+        if (listed == 0 && indexedRecords.Count == 0) throw new InvalidOperationException("Unable to list the remote files/mysql backup folders. The remote index was not changed.");
+        if (records.Count == 0) { records = indexedRecords; SaveLocalRemoteIndex(records); return records.OrderByDescending(x => x.CompletedAt).ToList(); }
         records = records.OrderByDescending(x => x.CompletedAt).ToList();
         await ApplyRemoteRetentionAsync(config, password, records);
         var freshPayload = JsonSerializer.SerializeToUtf8Bytes(records); await UploadRemoteBytesAsync(config, password, config.RemoteFolder.Trim('/') + "/backup-index.json", freshPayload);
@@ -397,6 +399,7 @@ public partial class MainWindow : Window
     {
         var config = _config.RemoteFtp; var ftpPassword = config is null ? null : Unprotect(config.EncryptedPassword); if (config is null || string.IsNullOrEmpty(ftpPassword)) { MessageBox.Show("Configure and save FTP settings first.", "Restore database"); return; }
         var root = Path.Combine(Path.GetTempPath(), "BackupManager-Restore-" + Guid.NewGuid().ToString("N")); Directory.CreateDirectory(root); var archivePath = Path.Combine(root, item.FileName);
+        MySqlRestoreLogEntry? restoreLog = null;
         try
         {
             SetBusy(true, "Downloading MySQL backup archive…"); var bytes = await DownloadRemoteBytesAsync(config, ftpPassword, RemoteArchivePath(config, item)); await File.WriteAllBytesAsync(archivePath, bytes); ZipFile.ExtractToDirectory(archivePath, root, true);
@@ -404,11 +407,29 @@ public partial class MainWindow : Window
             SetBusy(false); var request = ShowMySqlRestoreDialog(sqlFiles, Path.Combine(root, "users-and-privileges.sql")); if (request is null) return;
             var targets = sqlFiles.Select(x => (SqlFile: x, DatabaseName: sqlFiles.Count == 1 ? request.TargetDatabase : Path.GetFileNameWithoutExtension(x))).ToList(); var targetText = string.Join(", ", targets.Select(x => x.DatabaseName));
             var impact = request.ReplaceExisting ? "Existing target database data will be deleted and replaced." : "Existing target databases will be kept; the SQL will be imported into them."; if (MessageBox.Show($"Restore this archive to local MySQL ({request.Connection.Host}:{request.Connection.Port})?\n\nDatabases: {targetText}\n{impact}\n\nContinue?", "Confirm database restore", MessageBoxButton.YesNo, MessageBoxImage.Warning) != MessageBoxResult.Yes) return;
+            restoreLog = new MySqlRestoreLogEntry(DateTimeOffset.Now, item.FileName, RemoteArchivePath(config, item), request.Connection.Host, request.Connection.Port, request.Connection.UserName, targets.Select(x => x.DatabaseName).ToList(), request.ReplaceExisting, request.RestoreUsersAndPrivileges, "Running", null, null);
+            AppendMySqlRestoreLog(restoreLog);
             SetBusy(true, "Restoring MySQL database locally…"); await new MySqlRestoreService().RestoreAsync(request.Connection, request.Password, targets, request.ReplaceExisting, request.UsersAndPrivilegesFile, request.RestoreUsersAndPrivileges, CancellationToken.None); MessageBox.Show("MySQL restore completed successfully.", "Restore database");
+            if (restoreLog is not null) CompleteMySqlRestoreLog(restoreLog, "Completed", null);
         }
-        catch (Exception ex) { MessageBox.Show(ex.Message, "Database restore failed", MessageBoxButton.OK, MessageBoxImage.Error); }
+        catch (Exception ex) { if (restoreLog is not null) CompleteMySqlRestoreLog(restoreLog, "Failed", ex.Message); MessageBox.Show(ex.Message, "Database restore failed", MessageBoxButton.OK, MessageBoxImage.Error); }
         finally { while (_busyDepth > 0) SetBusy(false); try { if (Directory.Exists(root)) Directory.Delete(root, true); } catch { } }
     }
+    private string MySqlRestoreLogPath => Path.Combine(_dataPath, "mysql-restore-history.json");
+    private void AppendMySqlRestoreLog(MySqlRestoreLogEntry entry) { var entries = LoadMySqlRestoreLog(); entries.Add(entry); SaveMySqlRestoreLog(entries); }
+    private void CompleteMySqlRestoreLog(MySqlRestoreLogEntry entry, string status, string? error)
+    {
+        var entries = LoadMySqlRestoreLog(); var index = entries.FindIndex(x => x.Id == entry.Id);
+        if (index < 0) entries.Add(entry with { Status = status, CompletedAt = DateTimeOffset.Now, Error = error });
+        else entries[index] = entries[index] with { Status = status, CompletedAt = DateTimeOffset.Now, Error = error };
+        SaveMySqlRestoreLog(entries);
+    }
+    private List<MySqlRestoreLogEntry> LoadMySqlRestoreLog()
+    {
+        try { return File.Exists(MySqlRestoreLogPath) ? JsonSerializer.Deserialize<List<MySqlRestoreLogEntry>>(File.ReadAllText(MySqlRestoreLogPath)) ?? [] : []; }
+        catch { return []; }
+    }
+    private void SaveMySqlRestoreLog(List<MySqlRestoreLogEntry> entries) => File.WriteAllText(MySqlRestoreLogPath, JsonSerializer.Serialize(entries.OrderByDescending(x => x.StartedAt).Take(500), new JsonSerializerOptions { WriteIndented = true }));
     private MySqlRestoreRequest? ShowMySqlRestoreDialog(IReadOnlyList<string> sqlFiles, string usersAndPrivilegesFile)
     {
         var profiles = new MySqlDiscovery().FindWorkbenchProfiles(); if (profiles.Count == 0) { MessageBox.Show("No saved MySQL Workbench connection was found.", "Restore database"); return null; }
@@ -436,7 +457,7 @@ public partial class MainWindow : Window
         try { var bytes = await DownloadRemoteBytesAsync(config, password, RemoteArchivePath(config, item)); await File.WriteAllBytesAsync(target, bytes); MessageBox.Show($"Downloaded backup to:\n{target}", "Restore"); Process.Start("explorer.exe", "/select," + target); } catch (Exception ex) { MessageBox.Show(ex.Message, "Restore failed", MessageBoxButton.OK, MessageBoxImage.Error); } finally { SetBusy(false); }
     }
     private UIElement Restore() { var p = new StackPanel(); p.Children.Add(Text("Restore wizard", 18)); p.Children.Add(Text("Select a successful backup in Backup History, verify its checksum, select files/databases, choose a destination, and confirm overwrite impact.")); p.Children.Add(Action("Open backup location", (_, _) => Process.Start("explorer.exe", _dataPath))); return p; }
-    private UIElement Logs() { var p = new StackPanel(); p.Children.Add(Text("Logs", 18)); p.Children.Add(Text("Service and backup logs are stored in ProgramData\\BackupManager\\logs.")); p.Children.Add(Action("Open logs folder", (_, _) => { var x = Path.Combine(_dataPath, "logs"); Directory.CreateDirectory(x); Process.Start("explorer.exe", x); })); return p; }
+    private UIElement Logs() { var p = new StackPanel(); p.Children.Add(Text("Logs", 18)); p.Children.Add(Text("Service and backup logs are stored in ProgramData\\BackupManager\\logs. MySQL restore history is retained locally without passwords.")); p.Children.Add(Action("Open logs folder", (_, _) => { var x = Path.Combine(_dataPath, "logs"); Directory.CreateDirectory(x); Process.Start("explorer.exe", x); })); p.Children.Add(Action("Open MySQL restore history", (_, _) => { if (!File.Exists(MySqlRestoreLogPath)) File.WriteAllText(MySqlRestoreLogPath, "[]"); Process.Start("notepad.exe", MySqlRestoreLogPath); })); return p; }
     private UIElement Settings()
     {
         var p = new StackPanel(); p.Children.Add(Text("Settings", 18));
@@ -478,6 +499,10 @@ public sealed class DesktopConfig { public bool Paused { get; set; } public int 
 public sealed class RemoteFtpConfig { public string Host { get; set; } = ""; public int Port { get; set; } = 21; public string UserName { get; set; } = ""; public string RemoteFolder { get; set; } = "/backups"; public bool UseFtps { get; set; } = true; public bool TrustInvalidCertificate { get; set; } = true; public string? EncryptedPassword { get; set; } }
 public sealed record RemoteBackupRecord(string FileName, string Category, DateTimeOffset CompletedAt, string Sha256, string JobName) { public string ActionLabel => Category.Equals("mysql", StringComparison.OrdinalIgnoreCase) ? "Restore database" : "Save archive"; }
 public sealed record MySqlRestoreRequest(MySqlConnectionOptions Connection, string Password, string TargetDatabase, bool ReplaceExisting, bool RestoreUsersAndPrivileges, string UsersAndPrivilegesFile);
+public sealed record MySqlRestoreLogEntry(DateTimeOffset StartedAt, string ArchiveFile, string RemotePath, string ServerHost, int ServerPort, string UserName, List<string> Databases, bool ReplacedExisting, bool RestoredUsersAndPrivileges, string Status, DateTimeOffset? CompletedAt, string? Error)
+{
+    public Guid Id { get; init; } = Guid.NewGuid();
+}
 public sealed record SelectedFolderView(Guid JobId, Guid SourceId, string JobName, string Path) { public string Display => $"{Path}  —  {JobName}"; }
 public sealed record SelectedDatabaseView(Guid JobId, Guid DatabaseId, string JobName, string DatabaseName)
 {

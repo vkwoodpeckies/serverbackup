@@ -28,10 +28,21 @@ public sealed class FtpTransferService
             foreach (var argument in requestArguments) start.ArgumentList.Add(argument);
             using var process = Process.Start(start) ?? throw new InvalidOperationException("Windows curl.exe could not be started.");
             var outputTask = process.StandardOutput.ReadToEndAsync(token); var errorTask = process.StandardError.ReadToEndAsync(token); await process.WaitForExitAsync(token);
-            return new FtpCommandResult(process.ExitCode, await outputTask, await errorTask);
+            var result = new FtpCommandResult(process.ExitCode, await outputTask, await errorTask);
+            if (requestArguments.Any(x => string.Equals(x, "--list-only", StringComparison.OrdinalIgnoreCase))) WriteListingDiagnostic(options, requestArguments, result);
+            return result;
         }
         finally { try { File.Delete(netrc); } catch { } }
     }
 
     public static Uri Uri(RemoteFtpOptions options, string remotePath) => new($"ftp://{options.Host}:{options.Port}/{remotePath.TrimStart('/')}");
+    private static void WriteListingDiagnostic(RemoteFtpOptions options, IEnumerable<string> arguments, FtpCommandResult result)
+    {
+        try
+        {
+            var folder = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), "BackupManager", "logs"); Directory.CreateDirectory(folder);
+            File.AppendAllText(Path.Combine(folder, "ftp-listing.log"), $"{DateTimeOffset.Now:O} | {options.Host}:{options.Port} | {string.Join(" ", arguments)} | exit={result.ExitCode} | output={result.Output.Replace(Environment.NewLine, "\\n")} | error={result.Error.Replace(Environment.NewLine, "\\n")}{Environment.NewLine}");
+        }
+        catch { }
+    }
 }
