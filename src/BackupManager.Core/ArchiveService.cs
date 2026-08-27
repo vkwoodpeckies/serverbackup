@@ -20,6 +20,7 @@ public sealed class ArchiveService
                 var databaseDirectory = Path.Combine(stage, "databases"); Directory.CreateDirectory(databaseDirectory);
                 var dumper = new MySqlDumpService(); progress?.Report(new(job.Id, BackupRunState.BackingUpDatabase, "Exporting MySQL databases"));
                 foreach (var database in job.Databases) await dumper.DumpAsync(job.MySqlConnection, database, Path.Combine(databaseDirectory, database.DatabaseName + ".sql"), mysqlPassword, token);
+                if (job.IncludeMySqlUsersAndPrivileges) { progress?.Report(new(job.Id, BackupRunState.BackingUpDatabase, "Exporting MySQL users and privileges")); await dumper.ExportUsersAndPrivilegesAsync(job.MySqlConnection, job.Databases, Path.Combine(databaseDirectory, "users-and-privileges.sql"), mysqlPassword, token); }
             }
             var manifest = new { backupId = id, jobId = job.Id, jobName = job.Name, startedAt = started, computerName = Environment.MachineName, sources = job.Sources.Select(x => x.Path), databases = job.Databases.Select(x => x.DatabaseName), status = "Completed" };
             var manifestJson = JsonSerializer.Serialize(manifest);
