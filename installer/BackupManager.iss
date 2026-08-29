@@ -1,8 +1,8 @@
 [Setup]
 AppName=Backup Manager
-AppVersion=1.0.17
+AppVersion=1.0.18
 DefaultDirName={autopf}\Backup Manager
-OutputBaseFilename=BackupManagerSetup-1.0.17
+OutputBaseFilename=BackupManagerSetup-1.0.18
 PrivilegesRequired=admin
 [Files]
 Source: "..\publish\desktop\*"; DestDir: "{app}"; Flags: recursesubdirs ignoreversion

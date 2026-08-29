@@ -65,7 +65,7 @@ public partial class MainWindow : Window
         var section = new StackPanel { Margin = new Thickness(0, 20, 0, 0) }; Grid.SetRow(section, 1); section.Children.Add(Text("Recent activity", 18)); var list = new ListBox { Height = 310 }; foreach (var item in _config.History.OrderByDescending(x => x.CompletedAt).Take(10)) list.Items.Add($"{item.CompletedAt.ToLocalTime():g}  |  {item.JobName}  |  {item.Status}  |  {item.ArchivePath}"); if (list.Items.Count == 0) list.Items.Add("No backups have been run yet."); section.Children.Add(list); g.Children.Add(section); return g;
     }
     private Border Card(string heading, string value, string detail) => new() { Background = System.Windows.Media.Brushes.White, BorderBrush = System.Windows.Media.Brushes.LightGray, BorderThickness = new Thickness(1), CornerRadius = new CornerRadius(8), Margin = new Thickness(5), Padding = new Thickness(16), Child = new StackPanel { Children = { Text(heading, 11), new TextBlock { Text = value, FontSize = 23, FontWeight = FontWeights.SemiBold }, Text(detail, 12) } } };
-    private static string FormatSchedule(Schedule schedule) => schedule.Kind switch { "EveryHours" => $"Every {schedule.EveryHours} hour(s)", "Daily" => "Daily", "Weekly" => $"Weekly ({schedule.Day})", "Monthly" => "Monthly", _ => "Manual" };
+    private static string FormatSchedule(Schedule schedule) => schedule.Kind switch { "EveryMinutes" => $"Every {schedule.EveryMinutes} minute(s)", "EveryHours" => $"Every {schedule.EveryHours} hour(s)", "Daily" => "Daily", "Weekly" => $"Weekly ({schedule.Day})", "Monthly" => "Monthly", _ => "Manual" };
     private UIElement Jobs()
     {
         var p = new StackPanel(); var bar = new WrapPanel(); bar.Children.Add(Action("New backup job", (_, _) => CreateJob())); bar.Children.Add(Action("Run selected", (_, _) => RunSelected())); p.Children.Add(bar);
@@ -153,7 +153,7 @@ public partial class MainWindow : Window
         foreach (var job in _config.Jobs) jobSelector.Items.Add(job);
         jobSelector.SelectedIndex = 0; panel.Children.Add(jobSelector);
 
-        var choices = new[] { "Every 1 hour", "Every 2 hours", "Every 4 hours", "Every 6 hours", "Every 8 hours", "Every 12 hours", "Every 16 hours", "Daily", "Weekly", "Monthly" };
+        var choices = new[] { "Every 5 minutes", "Every 10 minutes", "Every 15 minutes", "Every 30 minutes", "Every 1 hour", "Every 2 hours", "Every 4 hours", "Every 6 hours", "Every 8 hours", "Every 12 hours", "Every 16 hours", "Daily", "Weekly", "Monthly" };
         var frequency = new System.Windows.Controls.ComboBox { Height = 34, Margin = new Thickness(0, 4, 0, 8) };
         foreach (var choice in choices) frequency.Items.Add(choice);
         frequency.SelectedIndex = 0; panel.Children.Add(frequency);
@@ -170,6 +170,7 @@ public partial class MainWindow : Window
                 "Daily" => new Schedule("Daily", Time: new TimeOnly(2, 0)),
                 "Weekly" => new Schedule("Weekly", Day: (DayOfWeek)weekday.SelectedItem!, Time: new TimeOnly(2, 0)),
                 "Monthly" => new Schedule("Monthly", Time: new TimeOnly(2, 0)),
+                _ when selected.Contains("minutes", StringComparison.OrdinalIgnoreCase) => new Schedule("EveryMinutes", EveryMinutes: int.Parse(selected.Split(' ')[1])),
                 _ => new Schedule("EveryHours", int.Parse(selected.Split(' ')[1]))
             };
             job.NextRun = ScheduleCalculator.Next(job.Schedule, DateTimeOffset.Now);

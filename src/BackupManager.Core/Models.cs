@@ -12,7 +12,7 @@ public sealed class MySqlConnectionOptions
     public string? MySqlExecutable { get; init; }
     public string? MySqlDumpExecutable { get; init; }
 }
-public sealed record Schedule(string Kind, int? EveryHours = null, DayOfWeek? Day = null, TimeOnly? Time = null);
+public sealed record Schedule(string Kind, int? EveryHours = null, DayOfWeek? Day = null, TimeOnly? Time = null, int? EveryMinutes = null);
 public sealed class BackupJob { public Guid Id { get; init; } = Guid.NewGuid(); public required string Name { get; init; } public string Description { get; init; } = ""; public JobState State { get; set; } = JobState.Enabled; public required string DestinationPath { get; init; } public Schedule Schedule { get; set; } = new("Manual"); public List<BackupSource> Sources { get; init; } = []; public List<MySqlSource> Databases { get; init; } = []; public MySqlConnectionOptions? MySqlConnection { get; set; } public bool IncludeMySqlUsersAndPrivileges { get; set; } public DateTimeOffset? LastRun { get; set; } public DateTimeOffset? NextRun { get; set; } }
 public sealed record BackupProgress(Guid JobId, BackupRunState State, string Message, long ProcessedBytes = 0, long TotalBytes = 0);
 public sealed record BackupArchive(string Category, string ArchivePath, string Sha256);

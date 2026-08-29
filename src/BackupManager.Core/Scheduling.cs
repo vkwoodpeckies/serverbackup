@@ -8,6 +8,7 @@ public static class ScheduleCalculator
             "Manual" => null,
             "Hourly" => from.AddHours(1),
             "EveryHours" when schedule.EveryHours is > 0 => from.AddHours(schedule.EveryHours.Value),
+            "EveryMinutes" when schedule.EveryMinutes is > 0 => from.AddMinutes(schedule.EveryMinutes.Value),
             "Daily" => AtTime(from.AddDays(1), schedule.Time),
             "Weekly" => NextDay(from, schedule.Day ?? DayOfWeek.Sunday, schedule.Time),
             "Monthly" => AtTime(new DateTimeOffset(from.Year, from.Month, 1, 0, 0, 0, from.Offset).AddMonths(1), schedule.Time),
