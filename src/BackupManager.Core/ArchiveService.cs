@@ -28,14 +28,14 @@ public sealed class ArchiveService
             if (job.Sources.Count > 0)
             {
                 var filesStage = Path.Combine(stage, "files"); await File.WriteAllTextAsync(Path.Combine(filesStage, "manifest.json"), manifestJson, token);
-                var filesZip = Path.Combine(root, $"{job.Name}_{stamp}_files.zip"); progress?.Report(new(job.Id, BackupRunState.Compressing, "Creating folders ZIP archive")); ZipFile.CreateFromDirectory(filesStage, filesZip, CompressionLevel.Optimal, false);
+                var filesZip = Path.Combine(root, $"{job.Name}_{stamp}{ScheduleCalculator.FrequencySuffix(job.Schedule)}_files.zip"); progress?.Report(new(job.Id, BackupRunState.Compressing, "Creating folders ZIP archive")); ZipFile.CreateFromDirectory(filesStage, filesZip, CompressionLevel.Optimal, false);
                 progress?.Report(new(job.Id, BackupRunState.Verifying, "Validating folders ZIP archive")); using (ZipFile.OpenRead(filesZip)) { }
                 archives.Add(new BackupArchive("Files", filesZip, await Sha256Async(filesZip, token)));
             }
             if (job.Databases.Count > 0)
             {
                 var databaseStage = Path.Combine(stage, "databases"); await File.WriteAllTextAsync(Path.Combine(databaseStage, "manifest.json"), manifestJson, token);
-                var databaseZip = Path.Combine(root, $"{job.Name}_{stamp}_mysql.zip"); progress?.Report(new(job.Id, BackupRunState.Compressing, "Creating MySQL ZIP archive")); ZipFile.CreateFromDirectory(databaseStage, databaseZip, CompressionLevel.Optimal, false);
+                var databaseZip = Path.Combine(root, $"{job.Name}_{stamp}{ScheduleCalculator.FrequencySuffix(job.Schedule)}_mysql.zip"); progress?.Report(new(job.Id, BackupRunState.Compressing, "Creating MySQL ZIP archive")); ZipFile.CreateFromDirectory(databaseStage, databaseZip, CompressionLevel.Optimal, false);
                 progress?.Report(new(job.Id, BackupRunState.Verifying, "Validating MySQL ZIP archive")); using (ZipFile.OpenRead(databaseZip)) { }
                 archives.Add(new BackupArchive("MySql", databaseZip, await Sha256Async(databaseZip, token)));
             }
@@ -50,6 +50,26 @@ public sealed class ArchiveService
     {
         if (!Directory.Exists(source.Path)) throw new DirectoryNotFoundException($"Source folder is unavailable: {source.Path}"); Directory.CreateDirectory(target);
         var exclusions = source.Exclusions ?? []; var option = source.IncludeSubdirectories ? SearchOption.AllDirectories : SearchOption.TopDirectoryOnly;
-        foreach (var file in Directory.EnumerateFiles(source.Path, "*", option)) { token.ThrowIfCancellationRequested(); if (exclusions.Any(e => file.Contains(e, StringComparison.OrdinalIgnoreCase) || Path.GetFileName(file).EndsWith(e.TrimStart('*'), StringComparison.OrdinalIgnoreCase))) continue; var dest = Path.Combine(target, Path.GetRelativePath(source.Path, file)); Directory.CreateDirectory(Path.GetDirectoryName(dest)!); await using var input = File.OpenRead(file); await using var output = File.Create(dest); await input.CopyToAsync(output, token); }
+        foreach (var file in Directory.EnumerateFiles(source.Path, "*", option))
+        {
+            token.ThrowIfCancellationRequested();
+            if (exclusions.Any(e => file.Contains(e, StringComparison.OrdinalIgnoreCase) || Path.GetFileName(file).EndsWith(e.TrimStart('*'), StringComparison.OrdinalIgnoreCase))) continue;
+            var dest = Path.Combine(target, Path.GetRelativePath(source.Path, file)); Directory.CreateDirectory(Path.GetDirectoryName(dest)!);
+            Exception? lastError = null;
+            for (var attempt = 1; attempt <= 4; attempt++)
+            {
+                try
+                {
+                    // Most active logs allow shared reads. This creates a consistent staged copy
+                    // while the source application continues writing to its live file.
+                    await using var input = new FileStream(file, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete, 64 * 1024, FileOptions.SequentialScan);
+                    await using var output = new FileStream(dest, FileMode.Create, FileAccess.Write, FileShare.None, 64 * 1024, FileOptions.SequentialScan);
+                    await input.CopyToAsync(output, token); lastError = null; break;
+                }
+                catch (IOException ex) when (attempt < 4) { lastError = ex; await Task.Delay(TimeSpan.FromMilliseconds(250 * attempt), token); }
+                catch (UnauthorizedAccessException ex) when (attempt < 4) { lastError = ex; await Task.Delay(TimeSpan.FromMilliseconds(250 * attempt), token); }
+            }
+            if (lastError is not null) throw new IOException($"Unable to copy '{file}' after several retries because it is locked or inaccessible.", lastError);
+        }
     }
 }

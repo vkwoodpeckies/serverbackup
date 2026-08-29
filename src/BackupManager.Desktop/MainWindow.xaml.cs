@@ -8,6 +8,7 @@ using System.Text;
 using System.Text.Json;
 using System.Windows;
 using System.Windows.Controls;
+using System.Windows.Threading;
 using Forms = System.Windows.Forms;
 using Button = System.Windows.Controls.Button;
 using ListBox = System.Windows.Controls.ListBox;
@@ -24,10 +25,17 @@ public partial class MainWindow : Window
     private DesktopConfig _config;
     private readonly Dictionary<string, string> _sessionMySqlPasswords = new();
     private bool _backupInProgress;
+    private readonly DispatcherTimer _dashboardRefreshTimer = new() { Interval = TimeSpan.FromSeconds(15) };
     public MainWindow()
     {
         InitializeComponent(); Directory.CreateDirectory(_dataPath); _configPath = Path.Combine(_dataPath, "desktop.json");
         _config = Load(); MigrateSecretsForService(); PauseButton.Content = _config.Paused ? "Resume" : "Pause"; ShowPage("Dashboard");
+        _dashboardRefreshTimer.Tick += (_, _) => RefreshDashboardFromDisk(); _dashboardRefreshTimer.Start();
+    }
+    private void RefreshDashboardFromDisk()
+    {
+        if (_backupInProgress || !string.Equals(PageTitle.Text, "Dashboard", StringComparison.OrdinalIgnoreCase)) return;
+        try { var latest = Load(); _config = latest; PauseButton.Content = _config.Paused ? "Resume" : "Pause"; ShowPage("Dashboard"); } catch { }
     }
     protected override void OnClosing(System.ComponentModel.CancelEventArgs e)
     {
@@ -61,7 +69,8 @@ public partial class MainWindow : Window
     private UIElement Dashboard()
     {
         var g = new Grid(); g.RowDefinitions.Add(new RowDefinition { Height = new GridLength(125) }); g.RowDefinitions.Add(new RowDefinition());
-        var jobFrequency = _config.Jobs.Count == 0 ? "No schedules configured" : string.Join(" • ", _config.Jobs.Select(x => $"{x.Name}: {FormatSchedule(x.Schedule)}")); var cards = new UniformGrid { Columns = 4 }; cards.Children.Add(Card("SERVICE", _config.Paused ? "PAUSED" : "READY", _config.Paused ? "Scheduling suspended" : "Scheduling enabled")); cards.Children.Add(Card("JOBS", _config.Jobs.Count.ToString(), jobFrequency)); cards.Children.Add(Card("LAST BACKUP", _config.LastBackup?.ToLocalTime().ToString("dd MMM yyyy HH:mm") ?? "Not run", "Latest completed backup")); cards.Children.Add(Card("NEXT BACKUP", _config.Jobs.Select(x => x.NextRun).Where(x => x.HasValue).Order().FirstOrDefault()?.ToLocalTime().ToString("dd MMM HH:mm") ?? "Not scheduled", "Next eligible job")); g.Children.Add(cards);
+        var backupFailed = string.Equals(_config.LastBackupStatus, "Failed", StringComparison.OrdinalIgnoreCase);
+        var jobFrequency = _config.Jobs.Count == 0 ? "No schedules configured" : string.Join(" • ", _config.Jobs.Select(x => $"{x.Name}: {FormatSchedule(x.Schedule)}")); var cards = new UniformGrid { Columns = 4 }; cards.Children.Add(Card("SERVICE", _config.Paused ? "PAUSED" : (backupFailed ? "ERROR" : "READY"), _config.Paused ? "Scheduling suspended" : (backupFailed ? $"Failed {_config.LastBackupAttempt?.ToLocalTime():dd MMM HH:mm}" : "Scheduling enabled"))); cards.Children.Add(Card("JOBS", _config.Jobs.Count.ToString(), jobFrequency)); cards.Children.Add(Card("LAST BACKUP", _config.LastBackup?.ToLocalTime().ToString("dd MMM yyyy HH:mm") ?? "Not run", backupFailed ? (_config.LastBackupError ?? "Scheduled backup failed") : "Latest completed backup")); cards.Children.Add(Card("NEXT BACKUP", _config.Jobs.Select(x => x.NextRun).Where(x => x.HasValue).Order().FirstOrDefault()?.ToLocalTime().ToString("dd MMM HH:mm") ?? "Not scheduled", "Next eligible job")); g.Children.Add(cards);
         var section = new StackPanel { Margin = new Thickness(0, 20, 0, 0) }; Grid.SetRow(section, 1); section.Children.Add(Text("Recent activity", 18)); var list = new ListBox { Height = 310 }; foreach (var item in _config.History.OrderByDescending(x => x.CompletedAt).Take(10)) list.Items.Add($"{item.CompletedAt.ToLocalTime():g}  |  {item.JobName}  |  {item.Status}  |  {item.ArchivePath}"); if (list.Items.Count == 0) list.Items.Add("No backups have been run yet."); section.Children.Add(list); g.Children.Add(section); return g;
     }
     private Border Card(string heading, string value, string detail) => new() { Background = System.Windows.Media.Brushes.White, BorderBrush = System.Windows.Media.Brushes.LightGray, BorderThickness = new Thickness(1), CornerRadius = new CornerRadius(8), Margin = new Thickness(5), Padding = new Thickness(16), Child = new StackPanel { Children = { Text(heading, 11), new TextBlock { Text = value, FontSize = 23, FontWeight = FontWeights.SemiBold }, Text(detail, 12) } } };
@@ -156,7 +165,9 @@ public partial class MainWindow : Window
         var choices = new[] { "Every 5 minutes", "Every 10 minutes", "Every 15 minutes", "Every 30 minutes", "Every 1 hour", "Every 2 hours", "Every 4 hours", "Every 6 hours", "Every 8 hours", "Every 12 hours", "Every 16 hours", "Daily", "Weekly", "Monthly" };
         var frequency = new System.Windows.Controls.ComboBox { Height = 34, Margin = new Thickness(0, 4, 0, 8) };
         foreach (var choice in choices) frequency.Items.Add(choice);
-        frequency.SelectedIndex = 0; panel.Children.Add(frequency);
+        var savedSchedule = ((BackupJob)jobSelector.SelectedItem).Schedule;
+        var savedChoice = savedSchedule.Kind == "EveryMinutes" ? $"Every {savedSchedule.EveryMinutes} minutes" : savedSchedule.Kind == "EveryHours" ? $"Every {savedSchedule.EveryHours} hour" + (savedSchedule.EveryHours == 1 ? "" : "s") : savedSchedule.Kind;
+        frequency.SelectedIndex = Math.Max(0, Array.FindIndex(choices, x => string.Equals(x, savedChoice, StringComparison.OrdinalIgnoreCase))); panel.Children.Add(frequency);
 
         var weekday = new System.Windows.Controls.ComboBox { Height = 34, Margin = new Thickness(0, 4, 0, 8), Visibility = Visibility.Collapsed };
         foreach (var day in Enum.GetValues<DayOfWeek>()) weekday.Items.Add(day);
@@ -273,7 +284,7 @@ public partial class MainWindow : Window
         var password = Unprotect(config.EncryptedPassword); if (string.IsNullOrEmpty(password)) throw new InvalidOperationException("Save the remote FTP password before running a backup.");
         var category = archive.Category.Equals("MySql", StringComparison.OrdinalIgnoreCase) ? "mysql" : "files";
         var stamp = backupStartedAt.ToLocalTime().ToString("dd_MMM_yyyy_hh_mm_tt", System.Globalization.CultureInfo.InvariantCulture).ToLowerInvariant();
-        var remotePath = config.RemoteFolder.Trim('/') + $"/{category}/backup_{category}_{stamp}.zip"; progress.Report(new(job.Id, BackupRunState.Uploading, $"Uploading {category} ZIP to remote FTP storage"));
+        var remotePath = config.RemoteFolder.Trim('/') + $"/{category}/backup_{category}_{stamp}{ScheduleCalculator.FrequencySuffix(job.Schedule)}.zip"; progress.Report(new(job.Id, BackupRunState.Uploading, $"Uploading {category} ZIP to remote FTP storage"));
         await UploadWithCurlAsync(config, password, archive.ArchivePath, remotePath);
         var record = new RemoteBackupRecord(Path.GetFileName(remotePath), category, backupStartedAt, archive.Sha256, job.Name);
         UpdateLocalRemoteIndex(record);
@@ -358,7 +369,7 @@ public partial class MainWindow : Window
                 {
                     var result = await RunCurlAsync(config, password, ["--list-only", FtpUri(config, remoteFolder + "/").ToString()]); if (result.ExitCode != 0) continue;
                     listed++;
-                    foreach (var name in result.Output.Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)) { if (!name.StartsWith("backup_", StringComparison.OrdinalIgnoreCase) || !name.EndsWith(".zip", StringComparison.OrdinalIgnoreCase)) continue; var stem = name[7..^4]; var split = stem.IndexOf('_'); if (split < 0) continue; var stamp = stem[(split + 1)..]; var completed = DateTimeOffset.Now; DateTimeOffset.TryParseExact(stamp, "dd_MMM_yyyy_hh_mm_tt", System.Globalization.CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.AssumeLocal, out completed); if (!records.Any(x => x.FileName.Equals(name, StringComparison.OrdinalIgnoreCase) && x.Category.Equals(category, StringComparison.OrdinalIgnoreCase))) records.Add(new RemoteBackupRecord(name, category, completed, "", "")); }
+                    foreach (var name in result.Output.Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)) { if (!name.StartsWith("backup_", StringComparison.OrdinalIgnoreCase) || !name.EndsWith(".zip", StringComparison.OrdinalIgnoreCase)) continue; var stem = name[7..^4]; var split = stem.IndexOf('_'); if (split < 0) continue; var stamp = stem[(split + 1)..]; var suffix = stamp.LastIndexOf('_'); if (suffix > 0 && (stamp[(suffix + 1)..].EndsWith("hr", StringComparison.OrdinalIgnoreCase) || stamp[(suffix + 1)..].EndsWith("min", StringComparison.OrdinalIgnoreCase) || stamp[(suffix + 1)..].Equals("daily", StringComparison.OrdinalIgnoreCase) || stamp[(suffix + 1)..].Equals("weekly", StringComparison.OrdinalIgnoreCase) || stamp[(suffix + 1)..].Equals("monthly", StringComparison.OrdinalIgnoreCase) || stamp[(suffix + 1)..].Equals("manual", StringComparison.OrdinalIgnoreCase))) stamp = stamp[..suffix]; var completed = DateTimeOffset.Now; DateTimeOffset.TryParseExact(stamp, "dd_MMM_yyyy_hh_mm_tt", System.Globalization.CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.AssumeLocal, out completed); if (!records.Any(x => x.FileName.Equals(name, StringComparison.OrdinalIgnoreCase) && x.Category.Equals(category, StringComparison.OrdinalIgnoreCase))) records.Add(new RemoteBackupRecord(name, category, completed, "", "")); }
                     if (records.Any(x => x.Category.Equals(category, StringComparison.OrdinalIgnoreCase))) break;
                 }
             }
@@ -496,7 +507,7 @@ public partial class MainWindow : Window
     private static long FolderSize(string path) { try { return Directory.Exists(path) ? Directory.EnumerateFiles(path, "*", SearchOption.AllDirectories).Sum(f => { try { return new FileInfo(f).Length; } catch { return 0; } }) : 0; } catch { return 0; } }
     private static string FormatSize(long bytes) { string[] units = ["B", "KB", "MB", "GB", "TB"]; var value = (double)bytes; var i = 0; while (value >= 1024 && i < units.Length - 1) { value /= 1024; i++; } return $"{value:0.##} {units[i]}"; }
 }
-public sealed class DesktopConfig { public bool Paused { get; set; } public int RetentionDays { get; set; } = 7; public List<BackupJob> Jobs { get; set; } = []; public List<RunRecord> History { get; set; } = []; public DateTimeOffset? LastBackup { get; set; } public string? EncryptedMySqlPassword { get; set; } public RemoteFtpConfig? RemoteFtp { get; set; } }
+public sealed class DesktopConfig { public bool Paused { get; set; } public int RetentionDays { get; set; } = 7; public List<BackupJob> Jobs { get; set; } = []; public List<RunRecord> History { get; set; } = []; public DateTimeOffset? LastBackup { get; set; } public DateTimeOffset? LastBackupAttempt { get; set; } public string? LastBackupStatus { get; set; } public string? LastBackupError { get; set; } public string? EncryptedMySqlPassword { get; set; } public RemoteFtpConfig? RemoteFtp { get; set; } }
 public sealed class RemoteFtpConfig { public string Host { get; set; } = ""; public int Port { get; set; } = 21; public string UserName { get; set; } = ""; public string RemoteFolder { get; set; } = "/backups"; public bool UseFtps { get; set; } = true; public bool TrustInvalidCertificate { get; set; } = true; public string? EncryptedPassword { get; set; } }
 public sealed record RemoteBackupRecord(string FileName, string Category, DateTimeOffset CompletedAt, string Sha256, string JobName) { public string ActionLabel => Category.Equals("mysql", StringComparison.OrdinalIgnoreCase) ? "Restore database" : "Save archive"; }
 public sealed record MySqlRestoreRequest(MySqlConnectionOptions Connection, string Password, string TargetDatabase, bool ReplaceExisting, bool RestoreUsersAndPrivileges, string UsersAndPrivilegesFile);
